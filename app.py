@@ -4,9 +4,7 @@ from datetime import datetime, timedelta, time
 import calendar as py_calendar
 from streamlit_calendar import calendar as st_calendar
 
-
 st.set_page_config(layout="wide", page_title="Class Scheduler")
-
 
 # --- 1. INITIALIZE DATA STORAGE ---
 if 'schedule' not in st.session_state:
@@ -16,9 +14,8 @@ if 'teachers_df' not in st.session_state:
 if 'rooms_df' not in st.session_state:
     st.session_state.rooms_df = pd.DataFrame(columns=["ID", "Name", "Campus"])
 
-
-# --- 2. CONFLICT DETECTION LOGIC ---
-def check_conflicts(teacher_id, room_id, start, end):
+# --- 2. CONFLICT DETECTION LOGIC (UPDATED FOR CO-TEACHING) ---
+def check_conflicts(class_code, teacher_ids, room_id, start, end):
     room_matches = st.session_state.rooms_df[st.session_state.rooms_df['ID'] == room_id]
     if room_matches.empty:
         return f"Room ID '{room_id}' not found."
@@ -26,10 +23,25 @@ def check_conflicts(teacher_id, room_id, start, end):
     new_campus = room_info['Campus']
 
     for cls in st.session_state.schedule:
-        if cls["teacher_id"] == teacher_id:
-            if start < cls["end"] and end > cls["start"]:
-                return f"Overlap: Already in {cls['room_name']} ({cls['start'].strftime('%H:%M')})"
+        # Check Time Overlap
+        if start < cls["end"] and end > cls["start"]:
+            
+            # 1. Room Conflict: Room already occupied by a DIFFERENT class code
+            if cls["room_id"] == room_id and cls["class_code"] != class_code:
+                return f"Room Overlap: {cls['room_name']} is already occupied by {cls['class_code']} ({cls['start'].strftime('%H:%M')})"
+            
+            # 2. Teacher Conflict: Any of the new teachers already scheduled
+            overlapping_teachers = set(cls["teacher_ids"]).intersection(set(teacher_ids))
+            if overlapping_teachers:
+                # If exact same class and room, it's a duplicate entry
+                if cls["class_code"] == class_code and cls["room_id"] == room_id:
+                    return f"Duplicate: Teachers {list(overlapping_teachers)} are already assigned to this exact class."
+                # Otherwise, teacher is double-booked
+                return f"Teacher Overlap: {list(overlapping_teachers)} already teaching {cls['class_code']} ({cls['start'].strftime('%H:%M')})"
 
+        # 3. Travel Warning (Check specific to each assigned teacher)
+        overlapping_teachers = set(cls["teacher_ids"]).intersection(set(teacher_ids))
+        if overlapping_teachers:
             prev_room = st.session_state.rooms_df[st.session_state.rooms_df['ID'] == cls['room_id']]
             if prev_room.empty:
                 continue
@@ -39,9 +51,8 @@ def check_conflicts(teacher_id, room_id, start, end):
                     gap_after  = (start - cls["end"]).total_seconds() / 60
                     gap_before = (cls["start"] - end).total_seconds() / 60
                     if (0 <= gap_after < 30) or (0 <= gap_before < 30):
-                        return f"Travel Warning: Needs 30m between {prev_room['Campus']} & {new_campus}"
+                        return f"Travel Warning: Teachers {list(overlapping_teachers)} need 30m between {prev_room['Campus']} & {new_campus}"
     return None
-
 
 # --- 3. SIDEBAR: DATA UPLOAD ---
 with st.sidebar:
@@ -75,7 +86,7 @@ with st.sidebar:
         st.markdown(
             "Your CSV must have these columns:\n"
             "- `class_code` — e.g. `MATH101`\n"
-            "- `teacher_id` — must match a loaded Teacher ID\n"
+            "- `teacher_ids` — comma separated (e.g. `T001, T002`)\n"
             "- `room_id` — must match a loaded Room ID\n"
             "- `date` — `YYYY-MM-DD`\n"
             "- `start_time` — `HH:MM` (24h)\n"
@@ -83,7 +94,7 @@ with st.sidebar:
         )
         st.dataframe(pd.DataFrame({
             "class_code": ["MATH101", "ENG201"],
-            "teacher_id": ["T001",    "T002"],
+            "teacher_ids": ["T001, T003", "T002"],
             "room_id":    ["R101",    "R102"],
             "date":       ["2026-03-03", "2026-03-03"],
             "start_time": ["09:00",   "10:00"],
@@ -98,7 +109,7 @@ with st.sidebar:
         else:
             try:
                 sched_csv = pd.read_csv(sched_file)
-                required_cols = {"class_code", "teacher_id", "room_id", "date", "start_time", "end_time"}
+                required_cols = {"class_code", "teacher_ids", "room_id", "date", "start_time", "end_time"}
                 missing_cols  = required_cols - set(sched_csv.columns)
 
                 if missing_cols:
@@ -110,10 +121,16 @@ with st.sidebar:
 
                     for idx, row in sched_csv.iterrows():
                         row_label = f"Row {idx + 2}"
+                        
+                        # Parse multi-teachers
+                        raw_t_ids = str(row['teacher_ids']).split(',')
+                        t_ids_parsed = [t.strip() for t in raw_t_ids]
 
-                        if str(row['teacher_id']) not in valid_teacher_ids:
-                            import_errors.append(f"{row_label}: Unknown teacher_id '{row['teacher_id']}'")
+                        invalid_teachers = [t for t in t_ids_parsed if t not in valid_teacher_ids]
+                        if invalid_teachers:
+                            import_errors.append(f"{row_label}: Unknown teacher_ids '{invalid_teachers}'")
                             continue
+
                         if str(row['room_id']) not in valid_room_ids:
                             import_errors.append(f"{row_label}: Unknown room_id '{row['room_id']}'")
                             continue
@@ -129,7 +146,7 @@ with st.sidebar:
                             import_errors.append(f"{row_label}: End time must be after start time")
                             continue
 
-                        conflict = check_conflicts(row['teacher_id'], row['room_id'], start_dt, end_dt)
+                        conflict = check_conflicts(row['class_code'], t_ids_parsed, row['room_id'], start_dt, end_dt)
                         if conflict:
                             import_errors.append(f"{row_label} ({row['class_code']}): {conflict}")
                             continue
@@ -140,7 +157,7 @@ with st.sidebar:
 
                         st.session_state.schedule.append({
                             "class_code": row['class_code'],
-                            "teacher_id": row['teacher_id'],
+                            "teacher_ids": t_ids_parsed,
                             "room_id":    row['room_id'],
                             "room_name":  room_name,
                             "start":      start_dt,
@@ -162,7 +179,6 @@ with st.sidebar:
     if st.button("Clear All Schedule Data"):
         st.session_state.schedule = []
         st.rerun()
-
 
 # --- 4. MAIN INTERFACE ---
 st.title("🗓️ Master Timetable")
@@ -188,15 +204,16 @@ else:
         with st.form("scheduling_form"):
             c1, c2 = st.columns([1, 1])
             class_code = c1.text_input("Class Code", placeholder="e.g., MATH101")
-            t_id = c2.selectbox(
-                "Teacher",
+            
+            # Use multi-select for co-teaching
+            t_ids = c2.multiselect(
+                "Teachers (Select one or more)",
                 st.session_state.teachers_df['ID'].tolist(),
                 format_func=lambda x: st.session_state.teachers_df[
                     st.session_state.teachers_df['ID'] == x
                 ]['Name'].values[0]
             )
 
-            # --- NEW: Campus pre-filter for room selection ---
             campus_options = ["All"] + sorted(
                 st.session_state.rooms_df['Campus'].dropna().unique().tolist()
             )
@@ -213,14 +230,12 @@ else:
             r_id = r_col.selectbox(
                 "Room",
                 filtered_rooms['ID'].tolist(),
-                # Adding a dynamic key forces the dropdown to completely reset when the campus changes
                 key=f"room_select_{campus_filter}", 
                 format_func=lambda x: (
                     f"{st.session_state.rooms_df[st.session_state.rooms_df['ID']==x]['Name'].values[0]}"
                     f" ({st.session_state.rooms_df[st.session_state.rooms_df['ID']==x]['Campus'].values[0]})"
                 )
             )
-            # -----------------------------------------------
 
             t_start = st.time_input("Start Time", time(9, 0))
             t_end   = st.time_input("End Time",   time(10, 0))
@@ -251,38 +266,42 @@ else:
                     dates_to_schedule = [d for d in all_days if d.weekday() in day_indices]
 
             if dates_to_schedule:
-                successes, errors = 0, []
-                for d in dates_to_schedule:
-                    start_dt = datetime.combine(d.date(), t_start)
-                    end_dt   = datetime.combine(d.date(), t_end)
-                    err = check_conflicts(t_id, r_id, start_dt, end_dt)
-                    if err:
-                        errors.append(f"{d.strftime('%b %d')}: {err}")
-                    else:
-                        st.session_state.schedule.append({
-                            "class_code": class_code,
-                            "teacher_id": t_id,
-                            "room_id":    r_id,
-                            "start":      start_dt,
-                            "end":        end_dt,
-                            "room_name":  st.session_state.rooms_df[
-                                st.session_state.rooms_df['ID'] == r_id
-                            ]['Name'].values[0]
-                        })
-                        successes += 1
-                if successes:
-                    st.success(f"Added {successes} classes for {class_code}.")
-                if errors:
-                    st.error(f"Conflicts found on {len(errors)} dates.")
-                for e in errors:
-                    st.caption(e)
+                if not t_ids:
+                    st.error("Please assign at least one teacher.")
+                elif not class_code:
+                    st.error("Please enter a class code.")
+                else:
+                    successes, errors = 0, []
+                    for d in dates_to_schedule:
+                        start_dt = datetime.combine(d.date(), t_start)
+                        end_dt   = datetime.combine(d.date(), t_end)
+                        
+                        err = check_conflicts(class_code, t_ids, r_id, start_dt, end_dt)
+                        if err:
+                            errors.append(f"{d.strftime('%b %d')}: {err}")
+                        else:
+                            st.session_state.schedule.append({
+                                "class_code": class_code,
+                                "teacher_ids": t_ids,
+                                "room_id":    r_id,
+                                "start":      start_dt,
+                                "end":        end_dt,
+                                "room_name":  st.session_state.rooms_df[
+                                    st.session_state.rooms_df['ID'] == r_id
+                                ]['Name'].values[0]
+                            })
+                            successes += 1
+                    if successes:
+                        st.success(f"Added {successes} classes for {class_code}.")
+                    if errors:
+                        st.error(f"Conflicts found on {len(errors)} dates.")
+                        for e in errors:
+                            st.caption(e)
 
-# --- TAB 2: VISUAL TIMETABLE (Optimized Layout) ---
+    # --- TAB 2: VISUAL TIMETABLE ---
     with tab2:
-        # 1. CUSTOM CSS: Fixes the width of the time column (the '6pm' issue)
         st.markdown("""
             <style>
-                /* Adjusts the width of the time labels column in FullCalendar */
                 .fc-timegrid-slot-label { width: 60px !important; }
                 .fc-timegrid-axis { width: 60px !important; }
             </style>
@@ -291,28 +310,34 @@ else:
         if 'clipboard' not in st.session_state:
             st.session_state.clipboard = None
 
-        # --- NEW DIALOG: EDIT & PASTE ---
         @st.dialog("Edit & Confirm Paste", width="large")
-        def paste_dialog(paste_start):
+        def paste_dialog(paste_start, current_view_mode, current_sid):
             clip = st.session_state.clipboard
             paste_end = paste_start + timedelta(minutes=clip['duration_mins'])
             
+            def_t_ids = [current_sid] if current_view_mode == "Teacher" and current_sid not in clip['teacher_ids'] else clip['teacher_ids']
+            def_r_id = current_sid if current_view_mode == "Room" else clip['room_id']
+
             st.markdown("### 📝 Edit Class Details")
             new_class_code = st.text_input("Class Code", value=clip['class_code'])
             
             col1, col2 = st.columns(2)
+            
+            t_options = st.session_state.teachers_df['ID'].tolist()
             with col1:
-                new_teacher_id = st.selectbox(
-                    "Assign Teacher",
-                    options=st.session_state.teachers_df['ID'].tolist(),
-                    index=st.session_state.teachers_df['ID'].tolist().index(clip['teacher_id']),
+                new_teacher_ids = st.multiselect(
+                    "Assign Teachers",
+                    options=t_options,
+                    default=[t for t in def_t_ids if t in t_options],
                     format_func=lambda x: st.session_state.teachers_df[st.session_state.teachers_df['ID'] == x]['Name'].values[0]
                 )
+                
+            r_options = st.session_state.rooms_df['ID'].tolist()
             with col2:
                 new_room_id = st.selectbox(
                     "Assign Room",
-                    options=st.session_state.rooms_df['ID'].tolist(),
-                    index=st.session_state.rooms_df['ID'].tolist().index(clip['room_id']),
+                    options=r_options,
+                    index=r_options.index(def_r_id) if def_r_id in r_options else 0,
                     format_func=lambda x: st.session_state.rooms_df[st.session_state.rooms_df['ID'] == x]['Name'].values[0]
                 )
 
@@ -320,13 +345,17 @@ else:
             new_room_name = st.session_state.rooms_df[st.session_state.rooms_df['ID'] == new_room_id]['Name'].values[0]
 
             if st.button("🚀 Confirm & Add to Master Data", use_container_width=True):
-                conflict = check_conflicts(new_teacher_id, new_room_id, paste_start, paste_end)
+                if not new_teacher_ids:
+                    st.error("Please assign at least one teacher.")
+                    return
+                
+                conflict = check_conflicts(new_class_code, new_teacher_ids, new_room_id, paste_start, paste_end)
                 if conflict:
                     st.error(f"❌ {conflict}")
                 else:
                     new_entry = {
                         "class_code": new_class_code,
-                        "teacher_id": new_teacher_id,
+                        "teacher_ids": new_teacher_ids,
                         "room_id": new_room_id,
                         "room_name": new_room_name,
                         "start": paste_start, "end": paste_end
@@ -335,22 +364,11 @@ else:
                     st.session_state.clipboard = None 
                     st.rerun()
 
-        # --- 2. MOVE ACTIONS TO TOP (Above View Mode) ---
-        # We retrieve the calendar state first to see if anything was clicked
-        # Note: In Streamlit, we define the calendar further down, but we process the previous run's state here.
-        # However, for a cleaner 'Top-Down' UI, we use a placeholder or check the 'state' variable after it's defined.
-        
-        # --- (A) CLIPBOARD INDICATOR ---
         if st.session_state.clipboard:
             st.warning(f"📋 **In Clipboard:** {st.session_state.clipboard['class_code']} | Click any time slot to paste.")
 
-        # --- (B) QUICK ACTION BAR (Moved to top) ---
-        # This will populate if a user clicks an event on the calendar
-        # We check the 'calendar_state' from the SESSION or directly from the component return
-        # Using a container to ensure it stays at the top
         action_container = st.container()
 
-        # --- 3. VIEW MODE & FILTERS ---
         st.divider()
         v_c1, v_c2 = st.columns([1, 2])
         v_mode = v_c1.radio("View Mode:", ["Teacher", "Room"], horizontal=True, key="tm_view_mode")
@@ -362,10 +380,9 @@ else:
             sid = v_c2.selectbox("Select Room", st.session_state.rooms_df['ID'].tolist(), 
                                  format_func=lambda x: st.session_state.rooms_df[st.session_state.rooms_df['ID']==x]['Name'].values[0])
 
-        # Prepare Events
         events = []
         for idx, x in enumerate(st.session_state.schedule):
-            if (v_mode == "Teacher" and x['teacher_id'] == sid) or (v_mode == "Room" and x['room_id'] == sid):
+            if (v_mode == "Teacher" and sid in x['teacher_ids']) or (v_mode == "Room" and x['room_id'] == sid):
                 events.append({
                     "id": str(idx),
                     "title": f"[{x['class_code']}]",
@@ -381,14 +398,13 @@ else:
             "timeZone": "UTC",
             "editable": True,
             "selectable": True,
-            "slotLabelWidth": "60", # Explicitly request width in pixels
+            "slotLabelWidth": "60",
+            "slotDuration":'00:15:00',
+            "allDaySlot": False, 
         }
 
-        # --- 4. RENDER CALENDAR ---
         state = st_calendar(events=events, options=calendar_options, key=f"cal_{v_mode}_{sid}")
 
-        # --- 5. LOGIC PROCESSING ---
-        # Update the 'Action Container' at the top if an event is clicked
         if state.get("eventClick"):
             event_id = int(state["eventClick"]["event"]["id"])
             item = st.session_state.schedule[event_id]
@@ -403,13 +419,13 @@ else:
                     st.session_state.schedule.pop(event_id)
                     st.rerun()
 
-        # Handle Dragging (Auto-save)
         if state.get("eventChange"):
             event_id = int(state["eventChange"]["event"]["id"])
             new_start = datetime.fromisoformat(state["eventChange"]["event"]["start"].split(".")[0].replace("Z", "")).replace(tzinfo=None)
             new_end = datetime.fromisoformat(state["eventChange"]["event"]["end"].split(".")[0].replace("Z", "")).replace(tzinfo=None)
             item = st.session_state.schedule.pop(event_id)
-            conflict = check_conflicts(item['teacher_id'], item['room_id'], new_start, new_end)
+            
+            conflict = check_conflicts(item['class_code'], item['teacher_ids'], item['room_id'], new_start, new_end)
             if not conflict:
                 item.update({"start": new_start, "end": new_end})
                 st.session_state.schedule.insert(event_id, item)
@@ -418,11 +434,10 @@ else:
                 st.error(conflict)
                 st.session_state.schedule.insert(event_id, item)
 
-        # Handle Pasting (Dialog)
         if state.get("dateClick") and st.session_state.clipboard:
             raw_date = state["dateClick"]["date"].split(".")[0].replace("Z", "")
             clicked_time = datetime.fromisoformat(raw_date).replace(tzinfo=None)
-            paste_dialog(clicked_time)
+            paste_dialog(clicked_time, v_mode, sid)
             
     # --- TAB 3: REPORTS ---
     with tab3:
@@ -446,10 +461,12 @@ else:
 
                 with col_rep1:
                     st.write("**Teacher Workload Summary**")
-                    t_sum = df_r.groupby('teacher_id')['Hrs'].sum().reset_index()
+                    # Explode the teacher_ids list so co-teachers both get the hours credited
+                    df_t_exp = df_r.explode('teacher_ids')
+                    t_sum = df_t_exp.groupby('teacher_ids')['Hrs'].sum().reset_index()
                     t_sum = t_sum.merge(
                         st.session_state.teachers_df[['ID', 'Name', 'Type']],
-                        left_on='teacher_id', right_on='ID'
+                        left_on='teacher_ids', right_on='ID'
                     )
                     st.dataframe(
                         t_sum[['Name', 'Type', 'Hrs']].sort_values('Hrs', ascending=False),
@@ -488,9 +505,12 @@ else:
             rev_r_map = dict(zip(st.session_state.rooms_df['Name'], st.session_state.rooms_df['ID']))
             c_map     = dict(zip(st.session_state.rooms_df['ID'], st.session_state.rooms_df['Campus']))
 
+            # Convert ID lists to comma-separated teacher names for easier display/editing
+            df_m['Teacher Names'] = df_m['teacher_ids'].apply(lambda ids: ", ".join([t_map.get(i, i) for i in ids]))
+
             disp_df = pd.DataFrame({
                 "Class Code":   df_m['class_code'],
-                "Teacher Name": df_m['teacher_id'].map(t_map),
+                "Teacher Names": df_m['Teacher Names'],
                 "Room Name":    df_m['room_id'].map(r_map),
                 "Campus":       df_m['room_id'].map(c_map),
                 "Start Time":   df_m['start'],
@@ -500,8 +520,8 @@ else:
             e_df = st.data_editor(
                 disp_df,
                 column_config={
-                    "Teacher Name": st.column_config.SelectboxColumn(
-                        "Teacher Name", options=list(t_map.values()), required=True
+                    "Teacher Names": st.column_config.TextColumn(
+                        "Teacher Names (Comma Separated)", required=True, help="Separate multiple teacher names with commas"
                     ),
                     "Room Name": st.column_config.SelectboxColumn(
                         "Room Name", options=list(r_map.values()), required=True
@@ -522,11 +542,16 @@ else:
             if c_s.button("💾 Save All Changes"):
                 new_s = []
                 for _, row in e_df.iterrows():
-                    if pd.isna(row['Teacher Name']) or pd.isna(row['Room Name']):
+                    if pd.isna(row['Teacher Names']) or pd.isna(row['Room Name']):
                         continue
+                    
+                    # Parse back to IDs
+                    raw_names = str(row['Teacher Names']).split(',')
+                    parsed_t_ids = [rev_t_map.get(n.strip(), n.strip()) for n in raw_names if n.strip() in rev_t_map]
+
                     new_s.append({
                         "class_code": row['Class Code'],
-                        "teacher_id": rev_t_map[row['Teacher Name']],
+                        "teacher_ids": parsed_t_ids,
                         "room_id":    rev_r_map[row['Room Name']],
                         "room_name":  row['Room Name'],
                         "start":      row['Start Time'],
@@ -536,15 +561,18 @@ else:
                 st.success("Schedule Updated!")
                 st.rerun()
 
-            # --- FIX 1: Export in bulk-upload-compatible format ---
             if c_e.button("📥 Export Master Schedule"):
                 export_rows = []
                 for _, row in e_df.iterrows():
-                    if pd.isna(row['Teacher Name']) or pd.isna(row['Room Name']):
+                    if pd.isna(row['Teacher Names']) or pd.isna(row['Room Name']):
                         continue
+                    
+                    raw_names = str(row['Teacher Names']).split(',')
+                    parsed_t_ids = [rev_t_map.get(n.strip(), n.strip()) for n in raw_names if n.strip() in rev_t_map]
+
                     export_rows.append({
                         "class_code": row['Class Code'],
-                        "teacher_id": rev_t_map.get(row['Teacher Name'], ""),
+                        "teacher_ids": ", ".join(parsed_t_ids),
                         "room_id":    rev_r_map.get(row['Room Name'], ""),
                         "date":       pd.to_datetime(row['Start Time']).strftime("%Y-%m-%d"),
                         "start_time": pd.to_datetime(row['Start Time']).strftime("%H:%M"),
