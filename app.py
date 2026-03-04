@@ -54,6 +54,12 @@ def check_conflicts(class_code, teacher_ids, room_id, start, end):
                         return f"Travel Warning: Teachers {list(overlapping_teachers)} need 30m between {prev_room['Campus']} & {new_campus}"
     return None
 
+@st.dialog("⚠️ Scheduling Conflict")
+def show_conflict_modal(message):
+    st.write("The following conflict was detected:")
+    st.error(message)
+
+
 # --- 3. SIDEBAR: DATA UPLOAD ---
 with st.sidebar:
     st.title("⚙️ Data Management")
@@ -400,7 +406,7 @@ else:
                 st.session_state.schedule.insert(event_id, item)
                 st.rerun()
             else:
-                st.error(conflict)
+                show_conflict_modal(conflict)
                 st.session_state.schedule.insert(event_id, item)
 
         if state.get("dateClick") and st.session_state.clipboard:
