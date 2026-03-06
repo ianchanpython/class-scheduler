@@ -261,7 +261,7 @@ else:
                 days_map = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
                 selected_days = st.multiselect("Repeat on:", list(days_map.keys()), default=["Mon"])
                 
-                submit_btn = st.form_submit_button("Generate Monthly Schedule")
+                submit_btn = st.form_submit_button("Schedule Class")
                 if submit_btn:
                     num_days  = py_calendar.monthrange(target_year, target_month)[1]
                     all_days  = [datetime(target_year, target_month, d) for d in range(1, num_days + 1)]
@@ -270,8 +270,34 @@ else:
 
             # Logic to process the "dates_to_schedule" remains the same...
             if dates_to_schedule:
-                # (Validation and session_state.schedule.append logic here)
-                pass
+                successes, errors = 0, []
+                for d in dates_to_schedule:
+                    start_dt = datetime.combine(d.date(), t_start)
+                    end_dt   = datetime.combine(d.date(), t_end)
+                    
+                    # Pass class_code to check_conflicts
+                    err = check_conflicts(class_code, t_ids, r_id, start_dt, end_dt)
+                    if err:
+                        errors.append(f"{d.strftime('%b %d')}: {err}")
+                    else:
+                        st.session_state.schedule.append({
+                            "class_code": class_code,
+                            "teacher_ids": t_ids,
+                            "room_id":    r_id,
+                            "start":      start_dt,
+                            "end":        end_dt,
+                            "room_name":  st.session_state.rooms_df[
+                                st.session_state.rooms_df['ID'] == r_id
+                            ]['Name'].values[0]
+                        })
+                        successes += 1
+                if successes:
+                    st.success(f"Added {successes} classes for {class_code}.")
+                if errors:
+                    st.error(f"Conflicts found on {len(errors)} dates.")
+                for e in errors:
+                    st.caption(e)
+
 
     # --- TAB 2: VISUAL TIMETABLE ---
     with tab2:
@@ -355,12 +381,17 @@ else:
             sid = v_c2.selectbox("Select Room", st.session_state.rooms_df['ID'].tolist(), 
                                  format_func=lambda x: st.session_state.rooms_df[st.session_state.rooms_df['ID']==x]['Name'].values[0])
 
+        # 1. Create a quick lookup map for teacher names
+        t_map = dict(zip(st.session_state.teachers_df['ID'].astype(str), st.session_state.teachers_df['Name']))
+        
         events = []
         for idx, x in enumerate(st.session_state.schedule):
             if (v_mode == "Teacher" and sid in x['teacher_ids']) or (v_mode == "Room" and x['room_id'] == sid):
+                # 2. Convert the list of IDs into a string of Names
+                teacher_names = ", ".join([t_map.get(str(tid), "Unknown") for tid in x['teacher_ids']])
                 events.append({
                     "id": str(idx),
-                    "title": f"[{x['class_code']}]",
+                    "title": f"[{x['class_code']}] {teacher_names}",
                     "start": x['start'].isoformat(),
                     "end": x['end'].isoformat(),
                     "color": "#3D9DF3" if v_mode == "Teacher" else "#FF4B4B"
